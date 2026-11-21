@@ -80,10 +80,36 @@ curl -X POST http://localhost:7071/api/register \
 - Never commit `local.settings.json` — connection strings live
   there. Use the `.example` file as the template.
 
-## What I will add next in this folder
+## 2026-11-22 — `RegisterUser` HTTP trigger landed
 
-- 2026-11-21: `RegisterUser` HTTP trigger + `shared/models.py`
-  (validation, Cosmos DB write, Service Bus publish).
-- 2026-11-22: `ProcessRegistration` queue trigger + welcome event.
+The trigger planned for 21 Nov is now real code in this folder
+(Azure was not the cloud pick on 21 Nov, so it lands a day late):
+
+- `shared/models.py` — pure-Python domain models: `RegistrationRequest`
+  validation (email format, name length, idempotency key) and
+  `UserRecord` for Cosmos DB. No Azure imports here, so the queue
+  trigger reuses the same rules.
+- `shared/__init__.py` — makes `shared` an importable package.
+- `RegisterUser/__init__.py` — the HTTP trigger: validate, write a
+  `pending` user record to Cosmos DB, publish to the Service Bus
+  queue, return `202 Accepted` with the registration id.
+- `RegisterUser/function.json` — HTTP trigger binding, `POST
+  /api/register`, anonymous auth for local dev (use `function` level
+  or API Management keys before exposing this publicly).
+
+### Idempotency, by construction
+
+A client may retry a request (timeout, flaky network) and must never
+create two users. The client sends an `idempotency_key`; the user id
+is derived deterministically from it (`uuid5`), so a retried request
+hits the same Cosmos DB `id` and the second write returns
+`CosmosResourceExistsError` — caught, logged, and answered with the
+same `202`. No separate idempotency table, no race: the Cosmos DB
+`id` uniqueness is the guard.
+
+### What I will add next in this folder
+
+- 2026-11-23: `ProcessRegistration` queue trigger + welcome event
+  (mark the user active, publish the welcome event).
 - Later: API Management in front, and a cost comparison with
   the AWS Lambda version.
