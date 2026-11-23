@@ -109,7 +109,29 @@ same `202`. No separate idempotency table, no race: the Cosmos DB
 
 ### What I will add next in this folder
 
-- 2026-11-23: `ProcessRegistration` queue trigger + welcome event
-  (mark the user active, publish the welcome event).
+- Next: the welcome sender function (Service Bus topic trigger) + API Management in front.
 - Later: API Management in front, and a cost comparison with
   the AWS Lambda version.
+
+## 2026-11-24 — `ProcessRegistration` queue trigger landed
+
+The second half of the chain is now real code: `RegisterUser` publishes to the queue, `ProcessRegistration` does the slow work.
+
+- `ProcessRegistration/__init__.py` — Service Bus queue trigger: read the message, fetch the user from Cosmos DB, mark it `active`, publish a `user_registered` welcome event to the Service Bus topic. It reuses `shared/models.py` — no duplicated validation or record shape.
+- `ProcessRegistration/function.json` — `serviceBusTrigger` on `%SERVICE_BUS_QUEUE%`, connection from the `SERVICE_BUS_CONNECTION` app setting.
+- New environment variable: `SERVICE_BUS_TOPIC` (the topic the welcome event goes to; the queue trigger only needs the queue name).
+
+### Idempotency, again — at-least-once delivery
+
+Service Bus delivers at-least-once, so this function must be safe to run twice for the same message. It is, by the status check: a user already `active` is skipped, so a duplicate delivery changes nothing. The Cosmos DB `replace_item` is the same write either way.
+
+### Poison handling — retry transient, drop permanent
+
+- Transient failure (Cosmos DB or Service Bus down): the exception propagates, the message is retried, and after `maxDeliveryCount` (set 5 on the queue) it is dead-lettered automatically. Nothing is lost silently.
+- Permanent failure (user id not in Cosmos DB): logged as an error and dropped. Retrying a message that can never succeed would poison the queue; this one needs a human to look at why the record is missing.
+- The AWS mirror has the same shape: SQS redrive to a DLQ after `maxReceiveCount` 3. Azure just makes the DLQ automatic per queue.
+
+### What I will add next in this folder
+
+- The welcome sender (Service Bus topic trigger) — actually send the welcome email / push, still stubbed in the architecture diagram.
+- API Management in front of the HTTP trigger, and a cost comparison with the AWS Lambda version.
