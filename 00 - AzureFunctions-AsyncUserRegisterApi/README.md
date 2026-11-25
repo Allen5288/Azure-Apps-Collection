@@ -202,4 +202,3 @@ now refers to the sender only, not to this step of the chain.
   - API Management in front of the HTTP trigger.
   - A cost comparison with the AWS Lambda version.
   
-  
