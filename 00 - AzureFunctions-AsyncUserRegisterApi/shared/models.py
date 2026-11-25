@@ -42,6 +42,7 @@ class UserRecord:
     email: str
     name: str
     status: str = "pending"  # pending -> active
+    welcome_sent: bool = False  # set by SendWelcome after the welcome goes out
     idempotency_key: str = ""
     created_at: str = ""
 
