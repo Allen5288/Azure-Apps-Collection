@@ -1,0 +1,1 @@
+{"bindings":[{"connection":"SERVICE_BUS_CONNECTION","direction":"in","name":"msg","subscriptionName":"%SERVICE_BUS_WELCOME_SUBSCRIPTION%","topicName":"%SERVICE_BUS_TOPIC%","type":"serviceBusTrigger"}],"scriptFile":"__init__.py"}
