@@ -197,8 +197,147 @@ now refers to the sender only, not to this step of the chain.
   - A cost comparison with the AWS Lambda version — same traffic,
     both bills, one table.
 
-  ### What I will add next in this folder
+  ## 2026-11-27 — API Management in front of the HTTP trigger: the front door
 
-  - API Management in front of the HTTP trigger.
-  - A cost comparison with the AWS Lambda version.
-  
+The chain is end to end now — register → process → welcome — but
+the front door is still the Functions HTTP trigger with anonymous
+auth, which the 22 Nov section flagged as "local dev only". Anyone
+with the URL can register users, and there is no throttling, no
+key, and no public surface a client can be pointed at. Today that
+changes: Azure API Management (APIM) becomes the front door, the
+way API Gateway is the front door for the AWS version.
+
+### What changes, and what does not
+
+| | Before | After |
+|---|---|---|
+| Public URL | `https://<app>.azurewebsites.net/api/register` | `https://<apim>.azure-api.net/register/v1/register` |
+| Who can call it | Anyone with the URL | Holders of a subscription key |
+| Throttling | None — a loop can fill the queue | 100 calls/min per subscription key |
+| Function auth | Anonymous (dev setting) | `function` level — APIM holds the function key, clients never see it |
+| What the function code does | Unchanged | Unchanged — the policy lives in APIM, not in the function |
+
+The function code does not change at all. That is the point: the
+front door is a platform concern, and it lives in the platform.
+`RegisterUser/function.json` changes one word — `authLevel` from
+`anonymous` to `function` — and the key moves to APIM's named
+values, where it is stored once and referenced by policy, never
+pasted into code or docs.
+
+### The policy: keys, throttling, and nothing leaking out
+
+```xml
+<!-- APIM policy on the register API (inbound section) -->
+<policies>
+  <inbound>
+    <base />
+    <!-- One subscription key per client; APIM checks it before
+         the request reaches the function. No key, no call. -->
+    <check-header name="Ocp-Apim-Subscription-Key" failed-check-httpcode="401"
+                  failed-check-error-message="Subscription key missing or invalid" />
+    <!-- 100 calls per minute per subscription. A loop filling the
+         queue hits this, not the function — the same job the AWS
+         usage plan will do (see the AWS notes, next section). -->
+    <rate-limit-by-key calls="100" renewal-period="60"
+                       counter-key="@(context.Subscription.Id)" />
+    <!-- The function key is APIM's secret, not the client's.
+         Strip the subscription key before forwarding, so it never
+         reaches the function logs. -->
+    <set-header name="Ocp-Apim-Subscription-Key" exists-action="delete" />
+    <set-backend-service base-url="https://<app>.azurewebsites.net/api" />
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>
+```
+
+Three decisions in that policy worth naming:
+
+- **Rate limit per subscription, not per IP.** An IP is shared
+  (an office NAT, a mobile carrier); a subscription is a client.
+  Per-IP limiting punishes the office and lets one client behind
+  many IPs through. The subscription id is the identity the rest
+  of the system already uses.
+- **The key is checked in APIM, not in the function.** The function
+  stays small and testable; the policy is the one place keys are
+  enforced. If the key check lived in the function, every new
+  function would re-implement it — the same mistake as validating
+  in every handler instead of at the boundary.
+- **The subscription key is stripped before forwarding.** The
+  function logs its requests; a key in those logs is a key in a
+  log store. The function key itself is a different secret — it
+  authenticates APIM to the function — and it lives in APIM's
+  named values, not in the repo.
+
+### Setting it up
+
+```bash
+# Consumption tier: no base fee, pay per call — the right start
+# for a demo API. Developer (~$50/month) adds a fixed cost and
+# features this API does not need yet (VNet, custom domains with
+# more control); Standard adds scale and SLA. Start Consumption,
+# move up when a customer contract needs the SLA.
+az apim create --name <apim> --resource-group <rg> \
+  --publisher-name "Harbourline" --publisher-email <email> \
+  --sku-name Consumption --location australiaeast
+
+az apim api create --service-name <apim> --resource-group <rg> \
+  --api-id register-v1 --path register/v1 --display-name "Register API v1"
+
+az apim api operation create --service-name <apim> --resource-group <rg> \
+  --api-id register-v1 --operation-id post-register \
+  --method POST --url-template /register
+
+# Point the operation at the function, with the function key from
+# named values — the key never appears in the command history.
+az apim api update --service-name <apim> --resource-group <rg> \
+  --api-id register-v1 --service-url https://<app>.azurewebsites.net/api
+```
+
+A **product** in APIM is the AWS usage plan: group the register API
+into a product, hand each client a subscription to that product,
+and the subscription key is their credential. Revoking a client is
+revoking a subscription — no code change, no redeploy.
+
+### JWT later, keys now
+
+Subscription keys answer "which client is calling"; they do not
+answer "which user". The Cognito / Entra ID step — APIM's
+`validate-jwt` policy checking the access token, the way the API
+Gateway JWT authorizer does it on AWS — comes when the API needs
+per-user authorisation (only the board creator edits the board).
+Keys now, JWT when the authorisation rule needs a user, not a
+client. Adding JWT before there is a per-user rule would be
+security theatre: a check that cannot fail is not a check.
+
+### AWS ↔ Azure mapping, updated
+
+| AWS (original project) | Azure (this project) |
+|---|---|
+| API Gateway | API Management |
+| Usage plan + API key | Product + subscription |
+| Throttling per key | `rate-limit-by-key` policy |
+| JWT authorizer | `validate-jwt` policy (next, when per-user auth lands) |
+| Stage (`prod`) | Revision (deploy a new revision, keep the old one until tested) |
+
+### Checklist before the next deploy
+
+- [ ] `RegisterUser` authLevel `function`; anonymous no longer
+      reaches the function directly (test: the old URL without a
+      key returns 401)
+- [ ] APIM Consumption instance created; register API imported;
+      subscription key issued for the first client
+- [ ] Rate-limit policy live; tested with a burst (101 calls in a
+      minute → the 101st gets 429)
+- [ ] Function key in APIM named values, never in the repo or docs
+
+### What this case still needs
+
+- A cost comparison with the AWS Lambda version — same traffic,
+  both bills, one table. That is the last piece before this case
+  is finished.
+
+### What I will add next in this folder
+
+- A cost comparison with the AWS Lambda version.
