@@ -338,6 +338,96 @@ security theatre: a check that cannot fail is not a check.
   both bills, one table. That is the last piece before this case
   is finished.
 
-### What I will add next in this folder
+## 2026-11-28 — Cost comparison with the AWS version: same traffic, both bills, one table
 
-- A cost comparison with the AWS Lambda version.
+**This finishes the case.** The Azure mirror of the AWS
+AsyncUserRegisterApi is now end to end — register → process →
+welcome (22–26 Nov), API Management in front (27 Nov) — and this
+section is the last piece the 27 Nov section asked for: the same
+traffic priced on both clouds, so the choice between them is a
+comparison of two rows, not an opinion.
+
+### The workload, fixed on both sides
+
+10,000 registrations a month. Each registration is three
+executions (HTTP trigger → queue trigger → topic trigger), one
+queue message plus one topic event, and a handful of small
+database reads/writes (write `pending`, mark `active`, set
+`welcome_sent`). Same traffic, same work — only the services
+change. Rates are indicative November 2026 list prices; verify on
+the pricing pages before budgeting.
+
+### The table
+
+| Layer | AWS | Azure | Cost at 10k registrations/month |
+|---|---|---|---|
+| Compute | Lambda, 30k executions (3 per registration) | Functions, Consumption plan, 30k executions | ~$0 both — inside the free grants (Lambda: 1M free requests + 400k GB-s; Functions: 1M free executions + 400k GB-s) |
+| Database | DynamoDB on-demand | Cosmos DB serverless | Cents both — DynamoDB on-demand is ~$1.25 per million writes; Cosmos serverless is ~$0.25 per million RUs. 10k registrations is tens of thousands of RUs/writes |
+| Queue | SQS (+ SNS fan-out for the welcome) | Service Bus queue + topic | AWS ~$0.00 (first 1M SQS requests free, then ~$0.40/million). Azure ~$10/month — the topic forces Standard tier; Basic has no topics |
+| Front door | API Gateway REST | API Management, Consumption tier | Cents both — API Gateway ~$3.50 per million calls (10k calls ≈ $0.04); APIM Consumption has no base fee and is pay-per-call at a similar order |
+| Observability | CloudWatch (dashboard ~$3/mo, alarms ~$0.10 each) | Application Insights / Azure Monitor | A few dollars both — the 26 Nov AWS dashboard stack is under $5/month; the Azure equivalent (one Application Insights instance, a handful of alert rules) is the same shape |
+| **Total** | **Under $1/month** | **~$10–13/month** | **The gap is one line: Service Bus Standard** |
+
+### Why Azure costs more at this volume — and why it is one line
+
+The whole difference is the welcome topic. The Azure chain
+publishes a `user_registered` event to a Service Bus topic so the
+welcome sender subscribes to it (26 Nov). Service Bus Basic has
+queues but no topics, so the topic forces Standard tier — about
+$10/month base, before a single message. Everything else (compute,
+database, front door) is inside a free grant or costs cents at
+10k registrations.
+
+The AWS side has no equivalent base fee: SQS and SNS are both
+pay-per-request with a free tier, so the AWS bill at this volume
+is the CloudWatch dashboard, not the pipeline. That is a pricing
+shape difference, not an architecture difference — the Azure
+design would cost ~$0 too if the welcome event went to a queue
+instead of a topic, and the AWS design would cost ~$10/month too
+if it needed a provisioned service with a base fee.
+
+### The verdict: when each one wins
+
+- **At this volume (10k/month), AWS wins on pure cost** — under
+  $1 vs ~$10–13, and the $10 is a standing charge that does not
+  fall if registrations fall to zero. For a side project or a
+  demo, that is the whole decision.
+- **The gap disappears with volume.** At 1M registrations a month
+  the per-request pricing dominates on both sides (compute,
+  database, messaging all scale with traffic), and the $10 base
+  fee is noise. Judge the two stacks at the volume you expect, not
+  the volume you have.
+- **Azure wins when the org is already on Azure.** One vendor for
+  identity (Entra ID instead of Cognito), one bill, one audit
+  trail, and the front door (APIM Consumption, no base fee) is
+  already there. The $10 buys operational simplicity, not savings
+  — the same conclusion the Medical AI cost comparison reached for
+  Azure AI Search.
+- **Neither wins on the code.** The three functions are the same
+  shape on both sides (validate → write `pending` → queue →
+  mark `active` → welcome), the idempotency guards are the same
+  rule in different clothes (DynamoDB conditional write vs Cosmos
+  DB `id` uniqueness vs `welcome_sent` flag), and the DLQ/poison
+  handling is the same pattern (SQS redrive vs Service Bus
+  `maxDeliveryCount`). The provider swap changes the bill and the
+  console, not the design.
+
+### What this case now covers
+
+- 2026-11-20: the plan and the AWS → Azure mapping.
+- 2026-11-22: `RegisterUser` HTTP trigger + shared models;
+  idempotency by deterministic user id.
+- 2026-11-24: `ProcessRegistration` queue trigger; poison
+  handling and the status-check guard.
+- 2026-11-26: `SendWelcome` topic trigger; the `welcome_sent`
+  flag — the third idempotency shape.
+- 2026-11-27: API Management in front — keys, throttling, the
+  public surface.
+- 2026-11-28: this cost comparison. **Case finished.**
+
+### What I will add next in this repo
+
+- The next Azure case starts tomorrow: a Blob-trigger thumbnail
+  pipeline (upload an image to Blob Storage → Function resizes it
+  → thumbnails back to Blob Storage), which exercises the trigger
+  type this case never used.
